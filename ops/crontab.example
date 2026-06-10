@@ -1,0 +1,10 @@
+# Host cron examples for long-batch.
+#
+# The container is deployed as "long-batch" by .github/workflows/docker-cicd.yml.
+# Run this command on the deployment host with: crontab -e
+
+# Preferred: run daily at 03:10, but the script only syncs when 15 days elapsed.
+10 3 * * * docker exec long-batch /app/shell/sync_due_national_law_db.sh >> /app/log/long-batch/cron.log 2>&1
+
+# Optional: daily check-only job at 02:30. Exit code 2 means changes exist.
+30 2 * * * docker exec long-batch /app/shell/check_national_law_db.sh >> /app/log/long-batch/check-cron.log 2>&1

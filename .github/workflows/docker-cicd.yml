@@ -1,0 +1,102 @@
+name: Long Batch Docker CI/CD
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  CONTAINER_NAME: long-batch
+  LOG_DIR: /app/log/long-batch
+  LEGISLATION_DIR: /app/legislation
+  NATIONAL_LAW_DB_INDEX_URLS: ${{ secrets.NATIONAL_LAW_DB_INDEX_URLS }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v4
+        if: github.event_name == 'push'
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,format=long
+            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Deploy to server via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}
+          CONTAINER_NAME: ${{ env.CONTAINER_NAME }}
+          LOG_DIR: ${{ env.LOG_DIR }}
+          LEGISLATION_DIR: ${{ env.LEGISLATION_DIR }}
+          NATIONAL_LAW_DB_INDEX_URLS: ${{ env.NATIONAL_LAW_DB_INDEX_URLS }}
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_KEY }}
+          envs: GITHUB_TOKEN,GITHUB_ACTOR,IMAGE_REPOSITORY,CONTAINER_NAME,LOG_DIR,LEGISLATION_DIR,NATIONAL_LAW_DB_INDEX_URLS
+          script: |
+            set -e
+
+            IMAGE_PATH=$(echo "$IMAGE_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+
+            echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+            docker pull "$IMAGE_PATH:latest"
+
+            sudo mkdir -p "$LOG_DIR" "$LEGISLATION_DIR"
+            sudo chown -R "$(id -u):$(id -g)" "$LOG_DIR" "$LEGISLATION_DIR"
+
+            docker stop "$CONTAINER_NAME" || true
+            docker rm "$CONTAINER_NAME" || true
+
+            docker run -d \
+              --name "$CONTAINER_NAME" \
+              --restart always \
+              -e LAW_DATA_DIR="$LEGISLATION_DIR" \
+              -e LOG_DIR="$LOG_DIR" \
+              -e NATIONAL_LAW_DB_INDEX_URLS="$NATIONAL_LAW_DB_INDEX_URLS" \
+              -v "$LOG_DIR:$LOG_DIR" \
+              -v "$LEGISLATION_DIR:/app/legislation" \
+              "$IMAGE_PATH:latest"
